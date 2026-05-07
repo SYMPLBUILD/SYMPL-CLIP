@@ -2400,53 +2400,53 @@ async function exportMp4(fmt,name,absStart,absEnd,dur){
   const timedCaps=isTimedCap?[...S.timedCaptions]:[];
   const capPos=S.edCapPos;
 
-  // Set up mp4-muxer
+  // Decode audio first so we know sample rate and channel count
+  const arrayBuffer=await new Promise((res,rej)=>{
+    const r=new FileReader();r.onload=e=>res(e.target.result);r.onerror=rej;
+    r.readAsArrayBuffer(S.file);
+  });
+  const actx=new AudioContext();
+  const decoded=await actx.decodeAudioData(arrayBuffer);
+  actx.close();
+
+  const sr=decoded.sampleRate;
+  const numCh=Math.min(decoded.numberOfChannels,2);
+
+  // Set up mp4-muxer with correct audio properties
   const muxer=new Mp4Muxer.Muxer({
     target: new Mp4Muxer.ArrayBufferTarget(),
     video:{codec:'avc',width:w,height:h,frameRate:30},
-    audio:{codec:'aac',sampleRate:44100,numberOfChannels:2},
+    audio:{codec:'aac',sampleRate:sr,numberOfChannels:numCh},
     fastStart:'in-memory',
   });
 
   // Video encoder — H.264
-  let videoEncoder=null;
   let encoderError=null;
-  videoEncoder=new VideoEncoder({
+  const videoEncoder=new VideoEncoder({
     output:(chunk,meta)=>muxer.addVideoChunk(chunk,meta),
     error:(e)=>{encoderError=e;},
   });
   await videoEncoder.configure({
-    codec:'avc1.42001f',  // H.264 Baseline
-    width:w, height:h,
+    codec:'avc1.42001f',
+    width:w,height:h,
     bitrate:8_000_000,
     framerate:30,
     hardwareAcceleration:'prefer-hardware',
   });
 
-  // Audio encoder — AAC
-  let audioEncoder=null;
-  audioEncoder=new AudioEncoder({
+  // Audio encoder — AAC with matching sample rate and channels
+  const audioEncoder=new AudioEncoder({
     output:(chunk,meta)=>muxer.addAudioChunk(chunk,meta),
     error:(e)=>{encoderError=e;},
   });
   await audioEncoder.configure({
-    codec:'mp4a.40.2',  // AAC-LC
-    sampleRate:44100,
-    numberOfChannels:2,
+    codec:'mp4a.40.2',
+    sampleRate:sr,
+    numberOfChannels:numCh,
     bitrate:128_000,
   });
 
-  // Decode audio from file for encoding
-  const arrayBuffer=await new Promise((res,rej)=>{
-    const r=new FileReader();r.onload=e=>res(e.target.result);r.onerror=rej;
-    r.readAsArrayBuffer(S.file);
-  });
-  const actx=new AudioContext({sampleRate:44100});
-  const decoded=await actx.decodeAudioData(arrayBuffer);
-  actx.close();
-
   // Slice audio to clip range
-  const sr=decoded.sampleRate;
   const startSample=Math.floor(absStart*sr);
   const endSample=Math.min(Math.ceil(absEnd*sr),decoded.length);
   const audioLength=endSample-startSample;
@@ -2459,9 +2459,9 @@ async function exportMp4(fmt,name,absStart,absEnd,dur){
       format:'f32-planar',
       sampleRate:sr,
       numberOfFrames:size,
-      numberOfChannels:decoded.numberOfChannels,
+      numberOfChannels:numCh,
       timestamp:Math.round(((startSample+i)/sr)*1_000_000),
-      data:buildAudioChunk(decoded,startSample+i,size),
+      data:buildAudioChunk(decoded,startSample+i,size,numCh),
     });
     audioEncoder.encode(audioData);
     audioData.close();
@@ -2543,12 +2543,15 @@ async function exportMp4(fmt,name,absStart,absEnd,dur){
   updateExpModal(100,dur,dur);
 }
 
-/* Build interleaved audio chunk for AudioData */
-function buildAudioChunk(buf,startSample,size){
-  const ch=buf.numberOfChannels;
-  const out=new Float32Array(size*ch);
-  for(let c=0;c<ch;c++){
-    const src=buf.getChannelData(c);
+/* Build f32-planar audio chunk for AudioData
+   f32-planar = all samples for channel 0, then all samples for channel 1 */
+function buildAudioChunk(buf,startSample,size,numCh){
+  numCh=numCh||buf.numberOfChannels;
+  const out=new Float32Array(size*numCh);
+  for(let c=0;c<numCh;c++){
+    // If source is mono and we need stereo, duplicate channel 0
+    const srcCh=Math.min(c,buf.numberOfChannels-1);
+    const src=buf.getChannelData(srcCh);
     for(let i=0;i<size;i++){
       out[c*size+i]=src[startSample+i]||0;
     }
