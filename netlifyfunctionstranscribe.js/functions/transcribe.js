@@ -1,9 +1,0 @@
-[build]
-  functions = "netlify/functions"
-
-[build.environment]
-  NODE_VERSION = "18"
-
-[functions]
-  node_bundler = "esbuild"
-  timeout = 120
